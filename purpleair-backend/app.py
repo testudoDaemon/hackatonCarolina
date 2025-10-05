@@ -12,11 +12,12 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from cachetools import TTLCache
 
+
 # -------------------------------
 # Helpers y constantes (nivel módulo)
 # -------------------------------
 
-# --- AQI helper (PM2.5) ---
+# --- AQI helper (PM2.5) US EPA ---
 PM25_BREAKPOINTS = [
     (0.0,   12.0,    0,   50,  "Good"),
     (12.1,  35.4,   51,  100,  "Moderate"),
@@ -25,6 +26,17 @@ PM25_BREAKPOINTS = [
     (150.5, 250.4, 201,  300,  "Very Unhealthy"),
     (250.5, 350.4, 301,  400,  "Hazardous"),
     (350.5, 500.4, 401,  500,  "Hazardous"),
+]
+
+# --- AQI helper (PM10) US EPA ---
+PM10_BREAKPOINTS = [
+    (0,    54,    0,   50,  "Good"),
+    (55,   154,  51,  100,  "Moderate"),
+    (155,  254, 101,  150,  "Unhealthy for Sensitive Groups"),
+    (255,  354, 151,  200,  "Unhealthy"),
+    (355,  424, 201,  300,  "Very Unhealthy"),
+    (425,  504, 301,  400,  "Hazardous"),
+    (505,  604, 401,  500,  "Hazardous"),
 ]
 
 
@@ -36,17 +48,30 @@ def pm25_to_aqi(pm25: float):
     return 500, "Hazardous"
 
 
+def pm10_to_aqi(pm10: float):
+    for C_lo, C_hi, I_lo, I_hi, category in PM10_BREAKPOINTS:
+        if C_lo <= pm10 <= C_hi:
+            aqi = (I_hi - I_lo) / (C_hi - C_lo) * (pm10 - C_lo) + I_lo
+            return round(aqi), category
+    return 500, "Hazardous"
+
+
+def safe_mean(values):
+    nums = [v for v in values if isinstance(v, (int, float))]
+    return round(sum(nums) / len(nums), 2) if nums else None
+
+
 def aqi_percent(aqi: float) -> float:
-    # porcentaje respecto al máximo 500 del índice US EPA
+    """Porcentaje del AQI respecto al máximo 500 (US EPA)."""
     pct = (aqi / 500.0) * 100.0
     return round(max(0.0, min(100.0, pct)), 2)
 
 
 def extract_field_value(pa_json, field_name: str):
     """
-    Soporta las dos formas comunes:
+    Soporta dos formatos típicos de PurpleAir:
     1) { "sensor": { "<field>": value, ... } }
-    2) { "fields": [...], "data": [[...]] } (v1 típico de PurpleAir)
+    2) { "fields": [...], "data": [[...]] }
     """
     if not pa_json:
         return None
@@ -72,9 +97,11 @@ def extract_field_value(pa_json, field_name: str):
 
 
 def build_field(base: str, variant: str = "atm", channel_suffix: str = "") -> str:
-    # base: "pm1.0", "pm2.5", "pm10.0"
-    # variant: "atm" o "cf_1"
-    # channel_suffix: "", "_a", "_b"
+    """
+    base: "pm1.0", "pm2.5", "pm10.0"
+    variant: "atm" o "cf_1"
+    channel_suffix: "", "_a", "_b"
+    """
     if variant not in ("atm", "cf_1"):
         variant = "atm"
     if channel_suffix not in ("", "_a", "_b"):
@@ -111,7 +138,7 @@ def create_app():
     SENSOR_INDEX = os.getenv("PURPLEAIR_SENSOR_INDEX", "")
     CACHE_TTL = int(os.getenv("CACHE_TTL", "20"))
     PA_TIMEOUT = int(os.getenv("PURPLEAIR_TIMEOUT", "5"))
-    STREAM_INTERVAL = int(os.getenv("STREAM_INTERVAL", "10"))
+    STREAM_INTERVAL = int(os.getenv("STREAM_INTERVAL", "1"))
 
     if not PA_KEY or not SENSOR_INDEX:
         raise RuntimeError("Faltan PURPLEAIR_API_KEY o PURPLEAIR_SENSOR_INDEX en .env")
@@ -127,7 +154,7 @@ def create_app():
         total=3,
         backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
+        allowed_methods=["GET"],
     )
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
@@ -135,8 +162,8 @@ def create_app():
 
     # Campos permitidos (whitelist opcional) SOLO para /api/sensor-data
     allowed_fields = {
-        "pm2.5", "pm2_5", "pm10.0", "pm10_0", "pm1.0", "pm1_0", "humidity", "temperature",
-        "pressure", "voc", "ozone1", "ozone2", "aqi"
+        "pm2.5", "pm2_5", "pm10.0", "pm10_0", "pm1.0", "pm1_0",
+        "humidity", "temperature", "pressure", "voc", "ozone1", "ozone2", "aqi",
     }
 
     def sanitize_fields(query_fields):
@@ -149,9 +176,7 @@ def create_app():
         return ",".join(whitelisted) if whitelisted else None
 
     def fetch_purpleair(fields: str | None):
-        """
-        Lee de cache si existe, si no, llama PurpleAir con headers y timeout.
-        """
+        """Lee de cache si existe; si no, consulta PurpleAir con headers y timeout."""
         cache_key = f"pa::{fields or 'ALL'}"
         if cache_key in cache:
             return cache[cache_key]
@@ -164,7 +189,6 @@ def create_app():
         try:
             r = session.get(PA_URL, headers=headers, params=params, timeout=PA_TIMEOUT)
             if r.status_code in (401, 403):
-                # Clave inválida o no permitida
                 app.logger.error(f"PurpleAir auth error: {r.status_code} {r.text[:200]}")
             r.raise_for_status()
             data = r.json()
@@ -172,7 +196,6 @@ def create_app():
             return data
         except requests.RequestException as e:
             app.logger.exception("Error consultando PurpleAir")
-            # Respuesta controlada para el frontend
             return {"error": "purpleair_unreachable", "detail": str(e)}
 
     # ---------- Rutas ----------
@@ -194,7 +217,7 @@ def create_app():
         fields = sanitize_fields(request.args.get("fields"))
 
         def event_stream():
-            # Nota: Mantén este generador liviano
+            # Nota: mantener este generador liviano
             while True:
                 data = fetch_purpleair(fields)
                 yield f"data: {json.dumps(data)}\n\n"
@@ -202,7 +225,7 @@ def create_app():
 
         headers = {
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # evitar buffering en reverse proxies; aquí por buenas prácticas
+            "X-Accel-Buffering": "no",  # evitar buffering en proxies
         }
         return Response(event_stream(), mimetype="text/event-stream", headers=headers)
 
@@ -219,16 +242,16 @@ def create_app():
         if value is None:
             return jsonify({"error": "field_not_found_or_null", "field": field}), 400
 
-        # PM1.0 no tiene AQI oficial. Aquí usamos aproximación con PM2.5 (opcional).
+        # PM1.0 no tiene AQI oficial → aproximación con PM2.5 (opcional).
         aqi_val, category = pm25_to_aqi(value)
         pct = aqi_percent(aqi_val)
 
         return jsonify({
             "field": field,
             "pm": value,
-            "aqi": aqi_val,            # quitar si no quieres aproximación para PM1.0
-            "aqi_percent": pct,        # quitar si no quieres aproximación para PM1.0
-            "category": category       # quitar si no quieres aproximación para PM1.0
+            "aqi": aqi_val,
+            "aqi_percent": pct,
+            "category": category,
         })
 
     @app.get("/api/pm25")
@@ -252,7 +275,7 @@ def create_app():
             "pm": value,
             "aqi": aqi_val,
             "aqi_percent": pct,
-            "category": category
+            "category": category,
         })
 
     @app.get("/api/pm10")
@@ -268,14 +291,90 @@ def create_app():
         if value is None:
             return jsonify({"error": "field_not_found_or_null", "field": field}), 400
 
-        # Nota: el AQI oficial para PM10 usa otros breakpoints (no los de PM2.5).
-        # Aquí devolvemos solo PM. Si quieres el AQI de PM10, te paso los breakpoints y lo añadimos.
+        # Aquí devolvemos solo PM. (Si quieres AQI PM10 ya está implementado como helper)
         return jsonify({
             "field": field,
             "pm": value,
             "aqi": None,
             "aqi_percent": None,
-            "category": None
+            "category": None,
+        })
+
+    @app.get("/api/aqi/combined")
+    def aqi_combined():
+        variant = request.args.get("variant", "atm")
+        channel = request.args.get("channel", "")
+        if channel not in ("", "_a", "_b"):
+            channel = ""
+
+        f_pm1  = build_field("pm1.0",  variant, channel)
+        f_pm25 = build_field("pm2.5",  variant, channel)
+        f_pm10 = build_field("pm10.0", variant, channel)
+        fields = ",".join([f_pm1, f_pm25, f_pm10])
+
+        data = fetch_purpleair(fields)
+        v_pm1  = extract_field_value(data, f_pm1)
+        v_pm25 = extract_field_value(data, f_pm25)
+        v_pm10 = extract_field_value(data, f_pm10)
+
+        # Sub-AQIs
+        subindices = []
+        det = {}
+
+        if v_pm25 is not None:
+            aqi25, cat25 = pm25_to_aqi(v_pm25)
+            det["pm25"] = {
+                "pm": v_pm25, "aqi": aqi25, "category": cat25,
+                "percent": aqi_percent(aqi25)
+            }
+            subindices.append(("pm25", aqi25, cat25))
+        else:
+            det["pm25"] = {"pm": None, "aqi": None, "category": None, "percent": None}
+
+        if v_pm10 is not None:
+            aqi10, cat10 = pm10_to_aqi(v_pm10)
+            det["pm10"] = {
+                "pm": v_pm10, "aqi": aqi10, "category": cat10,
+                "percent": aqi_percent(aqi10)
+            }
+            subindices.append(("pm10", aqi10, cat10))
+        else:
+            det["pm10"] = {"pm": None, "aqi": None, "category": None, "percent": None}
+
+        # PM1.0: aproximación usando PM2.5 (no oficial)
+        if v_pm1 is not None:
+            aqi1, cat1 = pm25_to_aqi(v_pm1)
+            det["pm1"] = {
+                "pm": v_pm1, "aqi": aqi1, "category": cat1,
+                "percent": aqi_percent(aqi1),
+                "note": "approx_from_pm25_breakpoints",
+            }
+            subindices.append(("pm1", aqi1, cat1))
+        else:
+            det["pm1"] = {"pm": None, "aqi": None, "category": None, "percent": None}
+
+        # AQI combinado: máximo sub-índice disponible
+        if subindices:
+            top = max(subindices, key=lambda t: t[1])  # (name, aqi, category)
+            combined_aqi = top[1]
+            combined_category = top[2]
+            combined_from = top[0]
+            combined_percent = aqi_percent(combined_aqi)
+        else:
+            combined_aqi = combined_category = combined_from = combined_percent = None
+
+        avg_pm = safe_mean([v_pm1, v_pm25, v_pm10])
+
+        return jsonify({
+            "fields": {"pm1": f_pm1, "pm25": f_pm25, "pm10": f_pm10},
+            "values": {"pm1": v_pm1, "pm25": v_pm25, "pm10": v_pm10, "pm_avg": avg_pm},
+            "subindices": det,
+            "combined": {
+                "aqi": combined_aqi,
+                "percent": combined_percent,
+                "category": combined_category,
+                "from": combined_from  # cuál PM determinó el AQI
+            }
         })
 
     return app
