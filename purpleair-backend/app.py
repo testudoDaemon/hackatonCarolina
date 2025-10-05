@@ -291,7 +291,7 @@ def create_app():
         if value is None:
             return jsonify({"error": "field_not_found_or_null", "field": field}), 400
 
-        # Aquí devolvemos solo PM. (Si quieres AQI PM10 ya está implementado como helper)
+        # Aquí devolvemos solo PM. (Si quieres AQI PM10, ya está el helper pm10_to_aqi)
         return jsonify({
             "field": field,
             "pm": value,
@@ -376,6 +376,56 @@ def create_app():
                 "from": combined_from  # cuál PM determinó el AQI
             }
         })
+
+    # --- helper para elevación (usa OpenTopoData) ---
+    def fetch_elevation(lat: float, lon: float) -> float | None:
+        """Consulta elevación (msnm) usando OpenTopoData (dataset srtm90m)."""
+        try:
+            r = session.get(
+                "https://api.opentopodata.org/v1/srtm90m",
+                params={"locations": f"{lat},{lon}"},
+                timeout=5
+            )
+            r.raise_for_status()
+            js = r.json()
+            results = js.get("results", [])
+            if results and "elevation" in results[0]:
+                return float(results[0]["elevation"])
+        except Exception as e:
+            app.logger.warning(f"OpenTopoData failed: {e}")
+        return None
+
+    @app.get("/api/location")
+    def api_location():
+        """
+        Devuelve coordenadas del sensor (PurpleAir) y opcionalmente elevación.
+        Query params:
+          - include_elevation=true|false (default false)
+        """
+        include_elev = request.args.get("include_elevation", "false").lower() == "true"
+
+        fields = "latitude,longitude,name,location_type"
+        data = fetch_purpleair(fields)
+
+        lat = extract_field_value(data, "latitude")
+        lon = extract_field_value(data, "longitude")
+        name = extract_field_value(data, "name")
+        loc_type = extract_field_value(data, "location_type")
+
+        if lat is None or lon is None:
+            return jsonify({"error": "no_coords"}), 404
+
+        out = {
+            "name": name,
+            "latitude": lat,
+            "longitude": lon,
+            "location_type": loc_type,
+        }
+
+        if include_elev:
+            out["elevation_m"] = fetch_elevation(lat, lon)
+
+        return jsonify(out)
 
     return app
 
