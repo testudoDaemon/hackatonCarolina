@@ -1,6 +1,7 @@
-import os, json, time, logging
+import os, json, time, logging, csv
+from io import StringIO
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, make_response
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -20,11 +21,11 @@ def create_app():
     ] or ["http://localhost:5173"]
     CORS(app, origins=allowed_origins)
 
-    # -------- Rate limiting (evita abuso) --------
+    # -------- Rate limiting --------
     limiter = Limiter(
         get_remote_address,
         app=app,
-        default_limits=["60 per minute"]  # ajusta según tus necesidades
+        default_limits=["60 per minute"]
     )
 
     # -------- Config PurpleAir --------
@@ -39,10 +40,10 @@ def create_app():
 
     PA_URL = f"https://api.purpleair.com/v1/sensors/{SENSOR_INDEX}"
 
-    # Cache en memoria
+    # -------- Cache --------
     cache = TTLCache(maxsize=128, ttl=CACHE_TTL)
 
-    # Sesión requests con reintentos
+    # -------- Sesión requests con reintentos --------
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -54,10 +55,10 @@ def create_app():
     session.mount("https://", adapter)
     session.mount("http://", adapter)
 
-    # Campos permitidos (whitelist opcional)
+    # -------- Campos permitidos --------
     allowed_fields = {
-        "pm2.5", "pm2_5", "pm10.0", "pm10_0", "pm1.0", "pm1_0", "humidity", "temperature",
-        "pressure", "voc", "ozone1", "ozone2", "aqi"
+        "pm2.5", "pm2_5", "pm10.0", "pm10_0", "pm1.0", "pm1_0", "humidity",
+        "temperature", "pressure", "voc", "ozone1", "ozone2", "aqi"
     }
 
     def sanitize_fields(query_fields: str | None):
@@ -70,9 +71,7 @@ def create_app():
         return ",".join(whitelisted) if whitelisted else None
 
     def fetch_purpleair(fields: str | None):
-        """
-        Lee de cache si existe, si no, llama PurpleAir con headers y timeout.
-        """
+        """Lee de cache si existe, si no, llama PurpleAir con headers y timeout."""
         cache_key = f"pa::{fields or 'ALL'}"
         if cache_key in cache:
             return cache[cache_key]
@@ -84,8 +83,7 @@ def create_app():
 
         try:
             r = session.get(PA_URL, headers=headers, params=params, timeout=PA_TIMEOUT)
-            if r.status_code == 401 or r.status_code == 403:
-                # Clave inválida o no permitida
+            if r.status_code in [401, 403]:
                 app.logger.error(f"PurpleAir auth error: {r.status_code} {r.text[:200]}")
             r.raise_for_status()
             data = r.json()
@@ -93,8 +91,9 @@ def create_app():
             return data
         except requests.RequestException as e:
             app.logger.exception("Error consultando PurpleAir")
-            # Respuesta controlada para el frontend
             return {"error": "purpleair_unreachable", "detail": str(e)}
+
+    # -------- Endpoints básicos --------
 
     @app.get("/health")
     @limiter.limit("10 per minute")
@@ -109,12 +108,11 @@ def create_app():
         return jsonify(data)
 
     @app.get("/api/sensor-data/stream")
-    @limiter.limit("10 per minute")  # limita inicios de stream
+    @limiter.limit("10 per minute")
     def sensor_stream():
         fields = sanitize_fields(request.args.get("fields"))
 
         def event_stream():
-            # Nota: Mantén este generador liviano
             while True:
                 data = fetch_purpleair(fields)
                 yield f"data: {json.dumps(data)}\n\n"
@@ -122,17 +120,51 @@ def create_app():
 
         headers = {
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no"  # evitar buffering en reverse proxies; aquí por buenas prácticas
+            "X-Accel-Buffering": "no"
         }
         return Response(event_stream(), mimetype="text/event-stream", headers=headers)
 
-    # Logging
+    # -------- Nuevo endpoint: Exportar CSV --------
+
+    @app.get("/api/sensor-data/csv")
+    def export_csv():
+        # 1️⃣ Obtener campos opcionales
+        fields = sanitize_fields(request.args.get("fields"))
+        data = fetch_purpleair(fields)
+
+        # 2️⃣ Crear un buffer temporal
+        csv_buffer = StringIO()
+        writer = csv.writer(csv_buffer)
+
+        # 3️⃣ Escribir encabezados
+        writer.writerow(["Campo", "Valor"])
+
+        # 4️⃣ Escribir datos
+        sensor = data.get("sensor", {})
+        if not sensor:
+            writer.writerow(["Error", "No se encontraron datos del sensor"])
+        else:
+            for key, value in sensor.items():
+                if isinstance(value, (str, int, float)):
+                    writer.writerow([key, value])
+                elif isinstance(value, dict):
+                    for subkey, subval in value.items():
+                        writer.writerow([f"{key}.{subkey}", subval])
+
+        # 5️⃣ Devolver el CSV como descarga
+        response = make_response(csv_buffer.getvalue())
+        response.headers["Content-Disposition"] = "attachment; filename=sensor_data.csv"
+        response.headers["Content-Type"] = "text/csv"
+        return response
+
+    # -------- Logging --------
     logging.basicConfig(level=logging.INFO)
+
     return app
+
 
 app = create_app()
 
 if __name__ == "__main__":
-    # Solo para desarrollo. En producción usa gunicorn (ver más abajo).
     port = int(os.getenv("API_PORT", "7777"))
     app.run(host="0.0.0.0", port=port)
