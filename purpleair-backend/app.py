@@ -134,5 +134,5 @@ app = create_app()
 
 if __name__ == "__main__":
     # Solo para desarrollo. En producción usa gunicorn (ver más abajo).
-    port = int(os.getenv("API_PORT", "8000"))
+    port = int(os.getenv("API_PORT", "7777"))
     app.run(host="0.0.0.0", port=port)
