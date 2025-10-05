@@ -9,27 +9,53 @@
           <p class="tagline">Respira, aprende y cuida tu entorno</p>
         </div>
       </div>
-      <button class="refresh-btn" @click="fetchSensorData" :disabled="loading">
-        <span class="btn-icon">🔄</span>
-        {{ loading ? 'Actualizando...' : 'Actualizar Datos' }}
-      </button>
+      <div class="header-buttons">
+        <button class="refresh-btn" @click="fetchSensorData" :disabled="loading">
+          <span class="btn-icon">🔄</span>
+          {{ loading ? 'Actualizando...' : 'Actualizar Datos' }}
+        </button>
+        <button class="refresh-btn map-btn" @click="fetchLocationData" :disabled="loadingLocation">
+          <span class="btn-icon">🗺️</span>
+          {{ loadingLocation ? 'Actualizando...' : 'Actualizar Mapa' }}
+        </button>
+      </div>
     </header>
 
     <!-- Contenido Principal -->
     <main class="main-content">
       <!-- Sección Superior: Ubicación y Estado Principal -->
       <div class="top-section">
+        <!-- Tarjeta de Ubicación con Mapa -->
         <div class="location-card card">
           <div class="card-header">
             <span class="card-icon">📍</span>
-            <h3>Ubicación</h3>
+            <h3>Ubicación del Sensor</h3>
           </div>
           <div class="card-content">
-            <p class="location-name">Saltillo</p>
-            <p class="sensor-info">Sensor: #31843</p>
+            <div class="location-info">
+              <p class="location-name">Saltillo, Coahuila</p>
+              <p class="sensor-info">Sensor: #31843</p>
+              <div class="coordinates">
+                <span class="coord-item">
+                  <strong>Lat:</strong> {{ locationData.latitude?.toFixed(5) || '--' }}
+                </span>
+                <span class="coord-item">
+                  <strong>Lon:</strong> {{ locationData.longitude?.toFixed(5) || '--' }}
+                </span>
+              </div>
+            </div>
+            
+            <!-- Mapa -->
+            <div class="map-container" v-if="hasLocationData">
+              <div id="sensor-map" class="sensor-map"></div>
+            </div>
+            <div class="map-placeholder" v-else>
+              <p>📍 Cargando ubicación...</p>
+            </div>
           </div>
         </div>
         
+        <!-- Resto de tu código permanece igual -->
         <div class="main-status-card card" :class="getStatusCardClass()">
           <div class="card-header">
             <h2>Calidad del Aire Actual</h2>
@@ -114,15 +140,31 @@ import Insalubre from '../assets/Peligrosa.png';
 import Peligrosa from '../assets/Peligrosa.png';
 import MuyDanina from '../assets/MuyDanina.png';
 
+// Importar Leaflet para el mapa
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+// Solucionar problema de iconos en Leaflet
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon-2x.png',
+  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-icon.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+});
+
 export default {
   name: 'AirQualityMonitor',
   data() {
     return {
       apiData: {},
+      locationData: {},
       loading: false,
+      loadingLocation: false,
       error: null,
       lastUpdate: 'Haz clic en Actualizar Datos',
-            statusImages: {
+      map: null,
+      marker: null,
+      statusImages: {
         'excelente': Excelente,
         'buena': Buena,
         'moderada': Moderada,
@@ -134,23 +176,27 @@ export default {
     }
   },
   computed: {
-    // Datos combinados del AQI
     combinedData() {
       return this.apiData.combined || {};
     },
-    // Valores de PM del sensor
     sensorValues() {
       return this.apiData.values || {};
     },
-    // PM promedio formateado
     formattedPmAvg() {
       const pmAvg = this.sensorValues.pm_avg;
       return pmAvg ? pmAvg.toFixed(1) : '--';
     },
-    // Subíndices individuales
     subindices() {
       return this.apiData.subindices || {};
+    },
+    hasLocationData() {
+      return this.locationData.latitude && this.locationData.longitude;
     }
+  },
+  mounted() {
+    // Cargar datos iniciales
+    this.fetchSensorData();
+    this.fetchLocationData();
   },
   methods: {
     async fetchSensorData() {
@@ -178,12 +224,82 @@ export default {
       }
     },
 
+    async fetchLocationData() {
+      this.loadingLocation = true;
+      
+      try {
+        const backendUrl = 'http://127.0.0.1:7777/api/location';
+        const response = await fetch(backendUrl);
+        
+        if (!response.ok) {
+          throw new Error(`Error del servidor: ${response.status}`);
+        }
+        
+        const data = await response.json();
+        this.locationData = data;
+        
+        // Actualizar el mapa con la nueva ubicación
+        this.updateMap();
+        
+      } catch (err) {
+        console.error('Error fetching location data:', err);
+        alert(`No se pudieron cargar los datos de ubicación: ${err.message}`);
+      } finally {
+        this.loadingLocation = false;
+      }
+    },
+
+    updateMap() {
+      if (!this.hasLocationData) return;
+
+      const { latitude, longitude } = this.locationData;
+      
+      // Si el mapa no existe, crearlo
+      if (!this.map) {
+        this.map = L.map('sensor-map').setView([latitude, longitude], 15);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '© OpenStreetMap contributors',
+          maxZoom: 18
+        }).addTo(this.map);
+        
+        // Crear marcador personalizado
+        const sensorIcon = L.divIcon({
+          html: '📍',
+          iconSize: [30, 30],
+          className: 'sensor-marker'
+        });
+        
+        this.marker = L.marker([latitude, longitude], { icon: sensorIcon })
+          .addTo(this.map)
+          .bindPopup(`
+            <div class="map-popup">
+              <strong>Sensor de Calidad del Aire</strong><br>
+              Lat: ${latitude.toFixed(5)}<br>
+              Lon: ${longitude.toFixed(5)}<br>
+              Estado: ${this.getPmCategory()}
+            </div>
+          `);
+      } else {
+        // Actualizar posición existente
+        this.map.setView([latitude, longitude], 15);
+        this.marker.setLatLng([latitude, longitude]);
+        this.marker.getPopup().setContent(`
+          <div class="map-popup">
+            <strong>Sensor de Calidad del Aire</strong><br>
+            Lat: ${latitude.toFixed(5)}<br>
+            Lon: ${longitude.toFixed(5)}<br>
+            Estado: ${this.getPmCategory()}
+          </div>
+        `);
+      }
+    },
+
     updateTime() {
       const now = new Date();
       this.lastUpdate = `Actualizado: ${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
     },
 
-    // Categorías basadas en PM promedio
     getPmCategory() {
       const pmAvg = this.sensorValues.pm_avg;
       if (!pmAvg) return 'Cargando...';
@@ -196,7 +312,6 @@ export default {
       return 'Peligrosa';
     },
 
-    // Obtener la imagen correspondiente al estado
     getStatusImage() {
       const category = this.getPmCategory().toLowerCase();
       return this.statusImages[category] || this.statusImages['cargando...'];
@@ -260,7 +375,7 @@ export default {
   padding: 20px;
 }
 
-/* Header Styles */
+/* Header Styles Mejorado */
 .app-header {
   display: flex;
   justify-content: space-between;
@@ -269,6 +384,126 @@ export default {
   padding: 0 10px;
   flex-wrap: wrap;
   gap: 20px;
+}
+
+.header-buttons {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+
+.map-btn {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Location Card Mejorada */
+.location-card {
+  display: flex;
+  flex-direction: column;
+  height: fit-content;
+}
+
+.location-info {
+  margin-bottom: 20px;
+}
+
+.location-name {
+  font-size: 1.6em;
+  font-weight: bold;
+  color: #667eea;
+  margin-bottom: 8px;
+}
+
+.sensor-info {
+  font-size: 1em;
+  color: #6c757d;
+  font-weight: 500;
+  margin-bottom: 12px;
+}
+
+.coordinates {
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+
+.coord-item {
+  background: #f8f9fa;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 0.9em;
+  color: #495057;
+}
+
+/* Mapa */
+.map-container {
+  margin-top: 15px;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.sensor-map {
+  height: 250px;
+  width: 100%;
+  border-radius: 12px;
+}
+
+.map-placeholder {
+  height: 250px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f8f9fa;
+  border-radius: 12px;
+  color: #6c757d;
+  font-size: 1.1em;
+}
+
+/* Popup del mapa personalizado */
+.map-popup {
+  text-align: center;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+.map-popup strong {
+  color: #667eea;
+}
+
+/* Marcador personalizado */
+.sensor-marker {
+  background: transparent !important;
+  border: none !important;
+  font-size: 24px;
+  text-align: center;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .header-buttons {
+    width: 100%;
+    justify-content: center;
+  }
+  
+  .refresh-btn {
+    flex: 1;
+    min-width: 200px;
+  }
+  
+  .sensor-map {
+    height: 200px;
+  }
+}
+
+@media (max-width: 480px) {
+  .coordinates {
+    flex-direction: column;
+    gap: 8px;
+  }
+  
+  .sensor-map {
+    height: 180px;
+  }
 }
 
 .logo-container {
@@ -391,26 +626,6 @@ export default {
   grid-template-columns: 1fr 2fr 1fr;
   gap: 25px;
   margin-bottom: 35px;
-}
-
-/* Location Card */
-.location-card {
-  display: flex;
-  flex-direction: column;
-  height: fit-content;
-}
-
-.location-name {
-  font-size: 1.8em;
-  font-weight: bold;
-  color: #667eea;
-  margin-bottom: 10px;
-}
-
-.sensor-info {
-  font-size: 1em;
-  color: #6c757d;
-  font-weight: 500;
 }
 
 /* Main Status Card - Layout Mejorado */
