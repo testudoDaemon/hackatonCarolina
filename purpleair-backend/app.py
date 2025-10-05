@@ -199,6 +199,11 @@ def create_app():
             return {"error": "purpleair_unreachable", "detail": str(e)}
 
     # ---------- Rutas ----------
+     # --------- NUEVO: raíz para status simple ---------
+    @app.get("/")
+    def root():
+        return jsonify({"ok": True, "service": "air-quality-backend"}), 200
+
     @app.get("/health")
     @limiter.limit("10 per minute")
     def health():
