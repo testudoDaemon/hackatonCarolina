@@ -193,12 +193,27 @@ export default {
       return this.locationData.latitude && this.locationData.longitude;
     }
   },
-  mounted() {
-    // Cargar datos iniciales
-    this.fetchSensorData();
-    this.fetchLocationData();
+  async mounted() {
+    await this.fetchInitialData();
   },
   methods: {
+    async fetchInitialData() {
+      try {
+        console.log('Iniciando carga automática de datos...');
+        
+        // Cargar datos del sensor y ubicación en paralelo
+        await Promise.all([
+          this.fetchSensorData(),
+          this.fetchLocationData()
+        ]);
+        
+        console.log('Datos cargados exitosamente');
+        
+      } catch (error) {
+        console.error('Error en carga inicial:', error);
+        this.error = 'Error al cargar los datos iniciales';
+      }
+    },
     async fetchSensorData() {
       this.loading = true;
       this.error = null;
@@ -237,9 +252,10 @@ export default {
         
         const data = await response.json();
         this.locationData = data;
-        
-        // Actualizar el mapa con la nueva ubicación
-        this.updateMap();
+
+                setTimeout(() => {
+          this.updateMap();
+        }, 100);
         
       } catch (err) {
         console.error('Error fetching location data:', err);
